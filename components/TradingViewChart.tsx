@@ -12,7 +12,7 @@ import {
   type ISeriesApi,
   type UTCTimestamp
 } from "lightweight-charts";
-import { Token, formatNumber, formatUsd } from "@/lib/tokens";
+import { Candle, Token, formatNumber, formatUsd } from "@/lib/tokens";
 
 type Props = {
   token: Token;
@@ -29,57 +29,11 @@ const intervals = ["1m", "5m", "15m", "1H", "4H", "1D"] as const;
 
 type ChartInterval = (typeof intervals)[number];
 
-const intervalSettings: Record<ChartInterval, { seconds: number; windowStart: number; swing: number; frequency: number }> = {
-  "1m": { seconds: 60, windowStart: 0.82, swing: 0.45, frequency: 2.9 },
-  "5m": { seconds: 5 * 60, windowStart: 0.68, swing: 0.65, frequency: 2.35 },
-  "15m": { seconds: 15 * 60, windowStart: 0.52, swing: 0.82, frequency: 1.95 },
-  "1H": { seconds: 60 * 60, windowStart: 0.32, swing: 1, frequency: 1.7 },
-  "4H": { seconds: 4 * 60 * 60, windowStart: 0.14, swing: 1.2, frequency: 1.28 },
-  "1D": { seconds: 24 * 60 * 60, windowStart: 0, swing: 1.45, frequency: 0.86 }
+type MarketResponse = {
+  configured: boolean;
+  candles: Candle[];
+  error?: string;
 };
-
-function tokenSeed(token: Token) {
-  return token.symbol.split("").reduce((seed, char) => seed + char.charCodeAt(0), 0);
-}
-
-function interpolate(values: number[], position: number) {
-  const leftIndex = Math.floor(position);
-  const rightIndex = Math.min(values.length - 1, leftIndex + 1);
-  const progress = position - leftIndex;
-  return values[leftIndex] + (values[rightIndex] - values[leftIndex]) * progress;
-}
-
-function createCandles(token: Token, interval: ChartInterval): CandlePoint[] {
-  const candleCount = 64;
-  const settings = intervalSettings[interval];
-  const step = settings.seconds;
-  const now = Math.floor(Math.floor(Date.now() / 1000) / step) * step;
-  const start = now - candleCount * step;
-  const seed = tokenSeed(token);
-
-  return Array.from({ length: candleCount }, (_, index) => {
-    const progress = index / (candleCount - 1);
-    const position = (settings.windowStart + progress * (1 - settings.windowStart)) * (token.sparkline.length - 1);
-    const base = interpolate(token.sparkline, position);
-    const previousProgress = Math.max(0, index - 1) / (candleCount - 1);
-    const previousPosition = (settings.windowStart + previousProgress * (1 - settings.windowStart)) * (token.sparkline.length - 1);
-    const previous = index === 0 ? base : interpolate(token.sparkline, previousPosition);
-    const swing = (Math.sin((index + seed) * settings.frequency) * 0.012 + Math.cos((index + seed) * settings.frequency * 0.37) * 0.008) * settings.swing;
-    const open = Math.max(0.000001, previous * (1 - swing * 0.35));
-    const close = Math.max(0.000001, base * (1 + swing * 0.25));
-    const wick = Math.max(open, close) * (0.008 + Math.abs(Math.sin(index + seed)) * 0.018);
-    const volumeWave = 0.55 + Math.abs(Math.sin(index * 0.48 + seed)) * 0.9;
-
-    return {
-      time: (start + index * step) as UTCTimestamp,
-      open,
-      high: Math.max(open, close) + wick,
-      low: Math.max(0.000001, Math.min(open, close) - wick),
-      close,
-      volume: Math.round(token.volume24h * (step / (24 * 60 * 60)) * volumeWave)
-    };
-  });
-}
 
 export function TradingViewChart({ token }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -87,10 +41,12 @@ export function TradingViewChart({ token }: Props) {
   const candleSeriesRef = useRef<CandleSeriesApi | null>(null);
   const volumeSeriesRef = useRef<VolumeSeriesApi | null>(null);
   const [activeInterval, setActiveInterval] = useState<ChartInterval>("1H");
-  const candles = useMemo(() => createCandles(token, activeInterval), [activeInterval, token]);
+  const [candles, setCandles] = useState<CandlePoint[]>([]);
+  const [marketStatus, setMarketStatus] = useState<"loading" | "ready" | "empty" | "unconfigured" | "error">("loading");
+  const [marketError, setMarketError] = useState("");
   const latest = candles[candles.length - 1];
   const previous = candles[candles.length - 2] ?? latest;
-  const latestUp = latest.close >= latest.open;
+  const latestUp = latest ? latest.close >= latest.open : true;
   const volumeData = useMemo<HistogramData<UTCTimestamp>[]>(
     () =>
       candles.map((candle) => ({
@@ -100,6 +56,65 @@ export function TradingViewChart({ token }: Props) {
       })),
     [candles]
   );
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadCandles() {
+      if (!token.mint) {
+        setCandles([]);
+        setMarketStatus("empty");
+        setMarketError("No live token address returned for this market.");
+        return;
+      }
+
+      setMarketStatus("loading");
+      setMarketError("");
+
+      try {
+        const response = await fetch(`/api/market?address=${encodeURIComponent(token.mint)}&interval=${activeInterval}`, {
+          signal: controller.signal
+        });
+        const data = (await response.json()) as MarketResponse;
+
+        if (!response.ok) {
+          throw new Error(data.error ?? "Market data unavailable");
+        }
+
+        if (!data.configured) {
+          setCandles([]);
+          setMarketStatus("unconfigured");
+          return;
+        }
+
+        const nextCandles = data.candles.map((candle) => ({
+          time: candle.time as UTCTimestamp,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume
+        }));
+
+        setCandles(nextCandles);
+        setMarketStatus(nextCandles.length > 0 ? "ready" : "empty");
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setCandles([]);
+        setMarketStatus("error");
+        setMarketError(error instanceof Error ? error.message : "Market data unavailable");
+      }
+    }
+
+    loadCandles();
+
+    return () => {
+      controller.abort();
+    };
+  }, [activeInterval, token.mint]);
 
   useEffect(() => {
     if (!containerRef.current) {
@@ -183,7 +198,9 @@ export function TradingViewChart({ token }: Props) {
   useEffect(() => {
     candleSeriesRef.current?.setData(candles);
     volumeSeriesRef.current?.setData(volumeData);
-    chartRef.current?.timeScale().fitContent();
+    if (candles.length > 0) {
+      chartRef.current?.timeScale().fitContent();
+    }
   }, [candles, volumeData]);
 
   return (
@@ -205,29 +222,53 @@ export function TradingViewChart({ token }: Props) {
           ))}
         </div>
         <div className="flex items-center gap-3 text-xs text-white/52">
-          <span>Vol {formatUsd(latest.volume)}</span>
+          <span>Vol {latest ? formatUsd(latest.volume) : "-"}</span>
           <span>24h {formatNumber(token.volume24h)}</span>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-2 border-b border-white/10 px-3 py-2 text-xs sm:flex sm:items-center sm:gap-5">
-        <span className="text-white/52">
-          O <span className="font-semibold text-white">{formatUsd(latest.open)}</span>
-        </span>
-        <span className="text-white/52">
-          H <span className="font-semibold text-mint">{formatUsd(latest.high)}</span>
-        </span>
-        <span className="text-white/52">
-          L <span className="font-semibold text-red-300">{formatUsd(latest.low)}</span>
-        </span>
-        <span className="text-white/52">
-          C <span className={latestUp ? "font-semibold text-mint" : "font-semibold text-red-300"}>{formatUsd(latest.close)}</span>
-        </span>
-        <span className={latest.close >= previous.close ? "font-semibold text-mint" : "font-semibold text-red-300"}>
-          {latest.close >= previous.close ? "+" : ""}
-          {(((latest.close - previous.close) / previous.close) * 100).toFixed(2)}%
-        </span>
+      {latest ? (
+        <div className="grid grid-cols-2 gap-2 border-b border-white/10 px-3 py-2 text-xs sm:flex sm:items-center sm:gap-5">
+          <span className="text-white/52">
+            O <span className="font-semibold text-white">{formatUsd(latest.open)}</span>
+          </span>
+          <span className="text-white/52">
+            H <span className="font-semibold text-mint">{formatUsd(latest.high)}</span>
+          </span>
+          <span className="text-white/52">
+            L <span className="font-semibold text-red-300">{formatUsd(latest.low)}</span>
+          </span>
+          <span className="text-white/52">
+            C <span className={latestUp ? "font-semibold text-mint" : "font-semibold text-red-300"}>{formatUsd(latest.close)}</span>
+          </span>
+          <span className={previous && latest.close >= previous.close ? "font-semibold text-mint" : "font-semibold text-red-300"}>
+            {previous && latest.close >= previous.close ? "+" : ""}
+            {previous ? (((latest.close - previous.close) / previous.close) * 100).toFixed(2) : "0.00"}%
+          </span>
+        </div>
+      ) : null}
+      <div className="relative h-[560px] min-h-[360px] w-full">
+        <div className="absolute inset-0" ref={containerRef} />
+        {marketStatus !== "ready" ? (
+          <div className="absolute inset-0 grid place-items-center bg-[#050806]/88 p-6 text-center">
+            <div>
+              <p className="text-sm font-semibold text-white">
+                {marketStatus === "loading"
+                  ? "Loading market data"
+                  : marketStatus === "unconfigured"
+                    ? "Birdeye API key required"
+                    : marketStatus === "empty"
+                      ? "No OHLCV data returned"
+                      : "Market data unavailable"}
+              </p>
+              <p className="mt-2 max-w-sm text-sm text-white/48">
+                {marketStatus === "unconfigured"
+                  ? "Set BIRDEYE_API_KEY on the server to show real Solana token candles."
+                  : marketError || "The chart will populate when the provider returns candles for this token."}
+              </p>
+            </div>
+          </div>
+        ) : null}
       </div>
-      <div className="h-[560px] min-h-[360px] w-full" ref={containerRef} />
     </div>
   );
 }

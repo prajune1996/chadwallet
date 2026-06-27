@@ -79,7 +79,7 @@ function SignalCard({
   );
 }
 
-function PhoneMock({ token, className = "" }: { token: Token; className?: string }) {
+function PhonePreview({ token, className = "" }: { token: Token; className?: string }) {
   return (
     <div className={`phone-shell rounded-[2rem] p-2 ${className}`}>
       <div className="phone-screen min-h-[430px] rounded-[1.55rem] p-4">
@@ -112,10 +112,14 @@ function PhoneMock({ token, className = "" }: { token: Token; className?: string
           </button>
         </div>
         <div className="mt-5 space-y-2">
-          {["Smart wallet bought", "Whale added liquidity", "New holder cluster"].map((item, index) => (
+          {[
+            ["24h volume", formatUsd(token.volume24h)],
+            ["Liquidity", formatUsd(token.liquidity)],
+            ["Holders", formatNumber(token.holders)]
+          ].map(([item, value]) => (
             <div className="flex items-center justify-between rounded-xl bg-white/[0.055] px-3 py-2" key={item}>
               <span className="text-xs text-white/62">{item}</span>
-              <span className="text-xs font-medium text-acid">{index === 0 ? "now" : `${index * 8}s`}</span>
+              <span className="text-xs font-medium text-acid">{value}</span>
             </div>
           ))}
         </div>
@@ -131,7 +135,7 @@ function PhoneMock({ token, className = "" }: { token: Token; className?: string
 }
 
 function WebTerminal({ tokens }: { tokens: Token[] }) {
-  const [top, second, third] = tokens;
+  const [top, second = tokens[0], third = tokens[0]] = tokens;
 
   return (
     <div className="surface scan-panel rounded-[2rem] p-3">
@@ -142,7 +146,7 @@ function WebTerminal({ tokens }: { tokens: Token[] }) {
             <span className="size-3 rounded-full bg-yellow-300" />
             <span className="size-3 rounded-full bg-mint" />
           </div>
-          <span className="rounded-full border border-acid/20 bg-acid/10 px-3 py-1 text-xs font-medium text-acid">live terminal</span>
+          <span className="rounded-full border border-acid/20 bg-acid/10 px-3 py-1 text-xs font-medium text-acid">market terminal</span>
         </div>
         <div className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)_230px]">
           <div className="rounded-2xl border border-white/10 bg-white/[0.045] p-3">
@@ -194,18 +198,17 @@ function WebTerminal({ tokens }: { tokens: Token[] }) {
             </div>
           </div>
           <div className="rounded-2xl border border-white/10 bg-white/[0.045] p-3">
-            <p className="mb-3 text-xs font-medium uppercase text-white/40">Smart wallets</p>
-            {[
-              ["7Jk...9qp", top],
-              ["Fmo...7Ch", second],
-              ["Ax8...Qd1", third]
-            ].map(([wallet, token]) => (
-              <div className="mb-2 rounded-xl bg-white/[0.05] p-3" key={String(wallet)}>
+            <p className="mb-3 text-xs font-medium uppercase text-white/40">Market movers</p>
+            {[top, second, third].map((token, index) => (
+              <div className="mb-2 rounded-xl bg-white/[0.05] p-3" key={`${token.symbol}-${index}`}>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">{wallet as string}</span>
-                  <span className="text-xs text-mint">buy</span>
+                  <span className="text-sm font-medium">{token.symbol}</span>
+                  <span className={token.change24h >= 0 ? "text-xs text-mint" : "text-xs text-red-300"}>
+                    {token.change24h >= 0 ? "+" : ""}
+                    {token.change24h.toFixed(1)}%
+                  </span>
                 </div>
-                <p className="mt-2 text-xs text-white/45">{(token as Token).symbol} position increased</p>
+                <p className="mt-2 text-xs text-white/45">{formatUsd(token.volume24h)} 24h volume</p>
               </div>
             ))}
             <Link className="mt-3 flex h-11 items-center justify-center rounded-xl bg-gradient-to-r from-acid to-mint text-sm font-semibold text-ink" href={`/trade?token=${top.symbol}`}>
@@ -220,7 +223,28 @@ function WebTerminal({ tokens }: { tokens: Token[] }) {
 
 export default async function Home() {
   const tokens = await getTokens();
-  const [top, second, third] = tokens;
+
+  if (tokens.length === 0) {
+    return (
+      <main className="min-h-screen bg-ink text-white">
+        <header className="mx-auto flex max-w-7xl items-center justify-between px-4 py-5 sm:px-6 lg:px-8">
+          <Logo />
+          <PrivyLogin compact />
+        </header>
+        <section className="mx-auto grid min-h-[70vh] max-w-3xl place-items-center px-4 text-center">
+          <div>
+            <p className="text-sm font-semibold uppercase text-acid">Market data unavailable</p>
+            <h1 className="mt-3 text-5xl font-semibold leading-tight sm:text-7xl">ChadWallet needs live token data.</h1>
+            <p className="mt-5 text-base leading-7 text-white/62">
+              Add `BIRDEYE_API_KEY` or confirm the public price provider is reachable. The app will not show hardcoded token prices.
+            </p>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  const [top, second = tokens[0], third = tokens[0]] = tokens;
 
   return (
     <main className="min-h-screen overflow-hidden bg-ink text-white">
@@ -266,17 +290,17 @@ export default async function Home() {
             <div className="orbital-ring absolute left-1/2 top-8 hidden h-[520px] w-[82%] -translate-x-1/2 lg:block" />
             <div className="orbital-ring absolute left-1/2 top-20 hidden h-[390px] w-[62%] -translate-x-1/2 lg:block" />
             <div className="absolute left-1/2 top-0 h-[500px] w-[76%] -translate-x-1/2 rounded-[5rem] bg-acid/10 blur-3xl" />
-            <SignalCard className="absolute left-10 top-5 w-[260px] -rotate-6" label="wallet cluster" token={top} />
-            <SignalCard className="absolute right-10 top-16 w-[260px] rotate-6" label="new heat" token={second} />
-            <SignalCard className="absolute bottom-28 left-24 w-[260px] rotate-3" label="holder spike" token={third} />
+            <SignalCard className="absolute left-10 top-5 w-[260px] -rotate-6" label="market volume" token={top} />
+            <SignalCard className="absolute right-10 top-16 w-[260px] rotate-6" label="token heat" token={second} />
+            <SignalCard className="absolute bottom-28 left-24 w-[260px] rotate-3" label="holder count" token={third} />
             <div className="absolute left-0 top-24 hidden w-[270px] -rotate-12 lg:block">
-              <PhoneMock token={second} />
+              <PhonePreview token={second} />
             </div>
             <div className="absolute right-0 top-24 hidden w-[270px] rotate-12 lg:block">
-              <PhoneMock token={third} />
+              <PhonePreview token={third} />
             </div>
             <div className="relative mx-auto w-full max-w-[430px] pt-8">
-              <PhoneMock className="float-soft" token={top} />
+              <PhonePreview className="float-soft" token={top} />
             </div>
           </div>
         </div>
@@ -285,10 +309,10 @@ export default async function Home() {
       <section id="feed" className="border-y border-white/10 bg-white/[0.035]">
         <div className="mx-auto grid max-w-7xl gap-5 px-4 py-16 sm:px-6 lg:grid-cols-[0.9fr_1.1fr] lg:px-8">
           <div className="max-w-xl">
-            <p className="text-sm font-semibold uppercase text-acid">Live signal feed</p>
+            <p className="text-sm font-semibold uppercase text-acid">Market signal feed</p>
             <h2 className="mt-3 text-4xl font-semibold leading-tight sm:text-6xl">The feed is the alpha.</h2>
             <p className="mt-5 text-base leading-7 text-white/62">
-              Track trending mints, high-conviction wallets, holder growth, and token velocity without opening five tabs.
+              Track trending mints, holder growth, liquidity, and token velocity without opening five tabs.
             </p>
           </div>
 
@@ -319,7 +343,11 @@ export default async function Home() {
               </Link>
             ))}
             <div className="grid gap-3 sm:grid-cols-3">
-              {["copied by 42 wallets", "liquidity up 18%", "fresh mint pressure"].map((item) => (
+              {[
+                `${formatNumber(top.holders)} ${top.symbol} holders`,
+                `${formatUsd(top.liquidity)} ${top.symbol} liquidity`,
+                `${formatUsd(top.volume24h)} ${top.symbol} volume`
+              ].map((item) => (
                 <div className="rounded-2xl border border-white/10 bg-black/20 p-4" key={item}>
                   <span className="mb-3 block size-2 rounded-full bg-acid" />
                   <p className="text-sm font-medium text-white/70">{item}</p>
@@ -344,7 +372,7 @@ export default async function Home() {
               {[
                 [ChartCandlestick, "Token chart", "Price action and momentum at a glance."],
                 [Wallet, "Position panel", "Balance, entry, route, and PnL in one view."],
-                [Radio, "Live trades", "Recent buys and sells streaming in."],
+                [Radio, "Live trades", "Recent buys and sells from Birdeye when configured."],
                 [ShieldCheck, "Privy login", `${privyLoginMethodsLabel} onboarding for users.`]
               ].map(([Icon, title, copy]) => (
                 <div className="surface surface-hover rounded-2xl p-4" key={String(title)}>
@@ -381,7 +409,7 @@ export default async function Home() {
           <div className="drift-x absolute -left-16 top-10 size-40 rounded-full border border-acid/20 bg-acid/10 blur-2xl" />
           <h2 className="mx-auto max-w-4xl text-4xl font-semibold leading-tight sm:text-7xl">stop watching charts alone.</h2>
           <p className="mx-auto mt-5 max-w-2xl text-base leading-7 text-white/62">
-            Sign in, discover what Solana wallets are buying, and open the trading page when the banner catches fire.
+            Sign in, discover Solana market flow, and open the trading page when the banner catches fire.
           </p>
           <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <a className="inline-flex h-12 items-center gap-3 rounded-xl border border-white/15 bg-white/[0.08] px-4 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:border-white/30" href={iphoneUrl} rel="noreferrer" target="_blank">

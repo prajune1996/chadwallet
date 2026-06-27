@@ -7,9 +7,13 @@ import { useLogin, usePrivy } from "@privy-io/react-auth";
 import { Logo } from "@/components/Logo";
 import { PrivyLogin } from "@/components/PrivyLogin";
 import { TradingViewChart } from "@/components/TradingViewChart";
-import { Token, formatNumber, formatUsd, liveTrades } from "@/lib/tokens";
+import { Holder, Token, Trade, formatNumber, formatUsd } from "@/lib/tokens";
 
 const hasPrivy = Boolean(process.env.NEXT_PUBLIC_PRIVY_APP_ID);
+
+function isIgnoredAuthError(error: unknown) {
+  return String(error).includes("exited_auth_flow");
+}
 
 type Props = {
   tokens: Token[];
@@ -22,24 +26,80 @@ type TradeFeedback =
   | { state: "success"; message: string }
   | { state: "error"; message: string };
 
+type MarketResponse = {
+  configured: boolean;
+  trades: Trade[];
+  holders: Holder[];
+  error?: string;
+};
+
 export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("1.5");
   const [tradeFeedback, setTradeFeedback] = useState<TradeFeedback>({ state: "idle", message: "" });
+  const [marketRows, setMarketRows] = useState<MarketResponse>({ configured: true, trades: [], holders: [] });
+  const [marketRowsStatus, setMarketRowsStatus] = useState<"loading" | "ready" | "unconfigured" | "error">("loading");
   const tradeFeedbackTimeoutRef = useRef<number | null>(null);
   const { ready, authenticated } = usePrivy();
   const { login } = useLogin({
-    onError: () => {
+    onError: (privyError) => {
+      if (isIgnoredAuthError(privyError)) {
+        setTradeFeedback({ state: "idle", message: "" });
+        return;
+      }
+
       setTradeFeedback({ state: "error", message: "Sign in failed. Try again before trading." });
     },
     onComplete: () => {
       setTradeFeedback({ state: "success", message: "Signed in. Review your amount and submit again." });
     }
   });
-  const selected = tokens.find((token) => token.symbol === selectedSymbol) ?? tokens[0];
+  const selected = tokens.find((token) => token.symbol.toLowerCase() === selectedSymbol?.toLowerCase()) ?? tokens[0];
   const amountValue = Number(amount);
   const estimated = Number.isFinite(amountValue) ? amountValue * selected.price : 0;
   const isValidAmount = Number.isFinite(amountValue) && amountValue > 0;
+  const controlsDisabled = !ready || marketRowsStatus === "loading" || tradeFeedback.state === "pending";
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadMarketRows() {
+      if (!selected.mint) {
+        setMarketRows({ configured: true, trades: [], holders: [] });
+        setMarketRowsStatus("ready");
+        return;
+      }
+
+      setMarketRowsStatus("loading");
+
+      try {
+        const response = await fetch(`/api/market?address=${encodeURIComponent(selected.mint)}`, {
+          signal: controller.signal
+        });
+        const data = (await response.json()) as MarketResponse;
+
+        if (!response.ok) {
+          throw new Error(data.error ?? "Market data unavailable");
+        }
+
+        setMarketRows(data);
+        setMarketRowsStatus(data.configured ? "ready" : "unconfigured");
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setMarketRows({ configured: true, trades: [], holders: [], error: error instanceof Error ? error.message : "Market data unavailable" });
+        setMarketRowsStatus("error");
+      }
+    }
+
+    loadMarketRows();
+
+    return () => {
+      controller.abort();
+    };
+  }, [selected.mint]);
 
   useEffect(() => {
     if (tradeFeedbackTimeoutRef.current) {
@@ -61,6 +121,11 @@ export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
   function handleTrade(event: MouseEvent<HTMLButtonElement>) {
     if (!isValidAmount) {
       setTradeFeedback({ state: "error", message: "Enter an amount greater than 0 SOL." });
+      return;
+    }
+
+    if (controlsDisabled) {
+      setTradeFeedback({ state: "pending", message: "Loading trading controls..." });
       return;
     }
 
@@ -132,6 +197,7 @@ export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
                   }`}
                   href={`/trade?token=${token.symbol}`}
                   key={token.symbol}
+                  scroll={false}
                 >
                   <div className="flex items-center justify-between">
                     <span className="flex items-center gap-3">
@@ -171,7 +237,9 @@ export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
                       {selected.name}
                     </span>
                   </div>
-                  <p className="mt-2 max-w-xl truncate text-sm text-white/45">{selected.mint}</p>
+                  <p className="mt-2 max-w-xl text-sm text-white/45">
+                    {selected.dataSource ? `Market data` : "Live Solana market data"}
+                  </p>
                 </div>
               </div>
               <div className="text-left md:text-right">
@@ -199,28 +267,46 @@ export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
             <div className="surface rounded-lg p-4">
               <h3 className="text-lg font-semibold">Live trades</h3>
               <div className="mt-4 overflow-hidden rounded-lg border border-white/10">
-                {liveTrades.map((trade) => (
-                  <div className="grid grid-cols-4 items-center border-b border-white/10 px-3 py-3 text-sm transition hover:bg-white/[0.045] last:border-b-0" key={`${trade.wallet}-${trade.time}`}>
+                {marketRows.trades.length > 0 ? marketRows.trades.map((trade) => (
+                  <div className="grid grid-cols-4 items-center border-b border-white/10 px-3 py-3 text-sm transition hover:bg-white/[0.045] last:border-b-0" key={trade.id}>
                     <span className={trade.side === "buy" ? "font-semibold uppercase text-mint" : "font-semibold uppercase text-red-300"}>{trade.side}</span>
                     <span className="text-white/65">{trade.wallet}</span>
                     <span>{trade.amount.toFixed(1)} {selected.symbol}</span>
                     <span className="text-right font-medium">{formatUsd(trade.value)}</span>
                   </div>
-                ))}
+                )) : (
+                  <div className="px-3 py-8 text-center text-sm text-white/48">
+                    {marketRowsStatus === "loading"
+                      ? "Loading trades"
+                      : marketRowsStatus === "unconfigured"
+                        ? "Set BIRDEYE_API_KEY to show real trades."
+                        : marketRows.error || "No recent swaps returned for this token."}
+                  </div>
+                )}
               </div>
             </div>
             <div className="surface rounded-lg p-4">
               <h3 className="text-lg font-semibold">Holders</h3>
               <div className="mt-4 grid gap-3">
-                {["Chad Alpha", "Wallet 9qp", "Smart Money", "Fresh Buyer", "LP Vault"].map((holder, index) => (
-                  <div className="flex items-center justify-between rounded-lg bg-white/[0.045] p-3 transition hover:bg-white/[0.075]" key={holder}>
+                {marketRows.holders.length > 0 ? marketRows.holders.map((holder) => (
+                  <div className="flex items-center justify-between rounded-lg bg-white/[0.045] p-3 transition hover:bg-white/[0.075]" key={holder.id}>
                     <span>
-                      <span className="block font-medium">{holder}</span>
-                      <span className="text-xs text-white/45">{(12.8 - index * 1.7).toFixed(1)}% supply</span>
+                      <span className="block font-medium">{holder.wallet}</span>
+                      <span className="text-xs text-white/45">
+                        {holder.percentage ? `${holder.percentage.toFixed(2)}% supply` : `${formatNumber(holder.amount)} ${selected.symbol}`}
+                      </span>
                     </span>
-                    <span className="font-semibold">{formatUsd(selected.price * (8200 - index * 950))}</span>
+                    <span className="font-semibold">{holder.valueUsd ? formatUsd(holder.valueUsd) : formatNumber(holder.amount)}</span>
                   </div>
-                ))}
+                )) : (
+                  <div className="rounded-lg bg-white/[0.045] p-4 text-center text-sm text-white/48">
+                    {marketRowsStatus === "loading"
+                      ? "Loading holders"
+                      : marketRowsStatus === "unconfigured"
+                        ? "Set BIRDEYE_API_KEY to show real holders."
+                        : marketRows.error || "No holder rows returned for this token."}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -231,7 +317,8 @@ export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
             <div className="grid grid-cols-2 rounded-lg bg-white/[0.06] p-1">
               {(["buy", "sell"] as const).map((mode) => (
                 <button
-                  className={`h-10 rounded-lg text-sm font-semibold capitalize transition ${side === mode ? "bg-gradient-to-r from-acid to-mint text-ink shadow-[0_10px_28px_rgba(184,255,66,.14)]" : "text-white/55 hover:text-white"}`}
+                  className={`h-10 rounded-lg text-sm font-semibold capitalize transition disabled:cursor-not-allowed disabled:opacity-50 ${side === mode ? "bg-gradient-to-r from-acid to-mint text-ink shadow-[0_10px_28px_rgba(184,255,66,.14)]" : "text-white/55 hover:text-white"}`}
+                  disabled={controlsDisabled}
                   key={mode}
                   onClick={() => setSide(mode)}
                   type="button"
@@ -244,7 +331,8 @@ export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
               Amount in SOL
             </label>
             <input
-              className="mt-2 h-14 w-full rounded-lg border border-white/10 bg-ink/80 px-4 text-2xl font-semibold outline-none ring-acid/40 transition focus:border-acid/50 focus:ring-4"
+              className="mt-2 h-14 w-full rounded-lg border border-white/10 bg-ink/80 px-4 text-2xl font-semibold outline-none ring-acid/40 transition focus:border-acid/50 focus:ring-4 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={controlsDisabled}
               id="amount"
               inputMode="decimal"
               onChange={(event) => setAmount(event.target.value)}
@@ -276,12 +364,13 @@ export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
               </div>
             </div>
             <button
-              className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-acid to-mint font-semibold text-ink shadow-[0_16px_38px_rgba(184,255,66,.16)] transition hover:-translate-y-0.5"
+              className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-acid to-mint font-semibold text-ink shadow-[0_16px_38px_rgba(184,255,66,.16)] transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+              disabled={controlsDisabled}
               onClick={handleTrade}
               type="button"
             >
-              {tradeFeedback.state === "pending" ? <Loader2 className="animate-spin" size={18} /> : null}
-              {tradeFeedback.state === "pending" ? "Submitting" : `${side === "buy" ? "Buy" : "Sell"} ${selected.symbol}`}
+              {controlsDisabled ? <Loader2 className="animate-spin" size={18} /> : null}
+              {!ready || marketRowsStatus === "loading" ? "Loading" : tradeFeedback.state === "pending" ? "Submitting" : `${side === "buy" ? "Buy" : "Sell"} ${selected.symbol}`}
             </button>
           </div>
 
@@ -290,20 +379,15 @@ export function TradingWorkspace({ tokens, selectedSymbol }: Props) {
               <WalletCards className="text-acid" size={20} />
               Your position
             </h3>
-            <div className="mt-4 grid gap-3">
-              <div className="flex justify-between">
-                <span className="text-white/55">Balance</span>
-                <span className="font-semibold">128.44 {selected.symbol}</span>
+            {authenticated ? (
+              <div className="mt-4 rounded-lg bg-white/[0.045] p-4 text-sm text-white/48">
+                Wallet portfolio balances need a Solana RPC/indexer connection before position PnL can be shown.
               </div>
-              <div className="flex justify-between">
-                <span className="text-white/55">Avg entry</span>
-                <span className="font-semibold">{formatUsd(selected.price * 0.82)}</span>
+            ) : (
+              <div className="mt-4 rounded-lg bg-white/[0.045] p-4 text-sm text-white/48">
+                Sign in with Privy to connect a Solana wallet.
               </div>
-              <div className="flex justify-between">
-                <span className="text-white/55">Unrealized PnL</span>
-                <span className="font-semibold text-mint">+{formatUsd(selected.price * 23.7)}</span>
-              </div>
-            </div>
+            )}
           </div>
 
           <div className="surface rounded-lg p-4">

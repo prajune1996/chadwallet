@@ -7,6 +7,10 @@ import { privyLoginMethodsLabel } from "@/components/privyLoginMethods";
 
 const hasPrivy = Boolean(process.env.NEXT_PUBLIC_PRIVY_APP_ID);
 
+function isIgnoredAuthError(error: unknown) {
+  return String(error).includes("exited_auth_flow");
+}
+
 function shortenAddress(address: string) {
   return `${address.slice(0, 4)}...${address.slice(-4)}`;
 }
@@ -17,6 +21,11 @@ export function PrivyLogin({ compact = false }: { compact?: boolean }) {
   const menuRef = useRef<HTMLSpanElement>(null);
   const { login } = useLogin({
     onError: (privyError) => {
+      if (isIgnoredAuthError(privyError)) {
+        setError(null);
+        return;
+      }
+
       setError(`Privy login failed: ${privyError}`);
     },
     onComplete: () => {
